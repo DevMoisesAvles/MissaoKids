@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#8b5cf6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Missão Kids">
+<title>Missão Kids</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+<div id="app"></div>
+<script>
+
+const STORAGE_KEY = 'missao-kids-data-v2';
+
+const defaultData = {
+  children: [],
+  taskTemplates: [],
+  tasks: []
+};
+
+function todayStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+
+      return migrateFromV1();
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      children: Array.isArray(parsed.children) ? parsed.children : [],
+      taskTemplates: Array.isArray(parsed.taskTemplates) ? parsed.taskTemplates : [],
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : []
+    };
+  } catch (e) {
+    return structuredClone(defaultData);
+  }
+}
+
+function migrateFromV1() {
+  try {
+    const raw = localStorage.getItem('missao-kids-data-v1');
+    if (!raw) return structuredClone(defaultData);
+    const parsed = JSON.parse(raw);
+    const children = Array.isArray(parsed.children) ? parsed.children : [];
+    const oldTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    const taskTemplates = [];
+    const tasks = oldTasks.map(t => {
+      // criar um template correspondente para cada tarefa antiga
+      const tmpl = { id: uid(), name: t.name, description: t.description || '', xp: t.xp };
+      taskTemplates.push(tmpl);
+      return {
+        id: t.id, templateId: tmpl.id, childId: t.childId,
+        name: t.name, description: t.description || '', xp: t.xp,
+        status: t.status || 'available', date: todayStr()
+      };
+    });
+    return { children, taskTemplates, tasks };
+  } catch (e) {
+    return structuredClone(defaultData);
+  }
+}
+
+function saveData() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+const EMOJIS = ['🐯','🐶','🐱','🐼','🐸','🦊','🐵','🦁','🐰','🐨','🐢','🐧','🦉'];
+
+
+const state = {
+  data: loadData(),
+  view: 'welcome',      
+  parentTab: 'overview', 
+  currentChildId: null,
+  mathChallenge: null,
+  modal: null,           
+  toastTimer: null
+};
+
+
+function showToast(message, type = 'info') {
+  let toast = document.querySelector('.toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  toast.className = 'toast ' + type;
+  toast.textContent = message;
+  requestAnimationFrame(() => toast.classList.add('show'));
+  if (state.toastTimer) clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => {
+    toast.classList.remove('show');
+  }, 2400);
+}
+
+// Multiplicação simples para limitar acesso da criança a tela de usuario master.
+//TESTAR  
+function generateMathChallenge() {
+  const a = Math.floor(Math.random() * 4) + 2; 
+  const b = Math.floor(Math.random() * 4) + 2; 
+  return { a, b, answer: a * b };
+}
+
+
+function go(view, extra = {}) {
+  state.view = view;
+  Object.assign(state, extra);
+  state.modal = null;
+  render();
+  document.querySelector('.content, .screen')?.scrollTo?.(0, 0);
+}
+
+function openModal(modal) {
+  state.modal = modal;
+  renderModalOnly();
+}
+function closeModal() {
+  state.modal = null;
+  removeModal();
+}
+
+function addChild(name, age) {
+  const emoji = EMOJIS[state.data.children.length % EMOJIS.length];
+  state.data.children.push({
+    id: uid(),
+    name: name.trim(),
+    age: Number(age) || 0,
+    emoji,
+    xp: 0
+  });
+  saveData();
+}
+function updateChild(id, name, age) {
+  const c = state.data.children.find(c => c.id === id);
+  if (!c) return;
+  c.name = name.trim();
+  c.age = Number(age) || 0;
+  saveData();
+}
+function deleteChild(id) {
+  state.data.children = state.data.children.filter(c => c.id !== id);
+  state.data.tasks = state.data.tasks.filter(t => t.childId !== id);
+  saveData();
+}
+
+function addTaskTemplate(name, description, xp) {
+  state.data.taskTemplates.push({
+    id: uid(),
+    name: name.trim(),
+    description: (description || '').trim(),
+    xp: Math.min(1000, Math.max(1, Number(xp) || 1))
+  });
+  saveData();
+}
+function updateTaskTemplate(id, name, description, xp) {
+  const tmpl = state.data.taskTemplates.find(t => t.id === id);
+  if (!tmpl) return;
+  tmpl.name = name.trim();
+  tmpl.description = (description || '').trim();
+  tmpl.xp = Math.min(1000, Math.max(1, Number(xp) || 1));
+  saveData();
+}
+function deleteTaskTemplate(id) {
+  state.data.taskTemplates = state.data.taskTemplates.filter(t => t.id !== id);
+  state.data.tasks = state.data.tasks.filter(t => t.templateId !== id);
+  saveData();
+}
+
+
+function getAssignedChildIdsForTemplate(templateId) {
+  return state.data.tasks
+    .filter(t => t.templateId === templateId)
+    .map(t => t.childId);
+}
+
+function toggleAssignment(templateId, childId) {
+  const tmpl = state.data.taskTemplates.find(t => t.id === templateId);
+  if (!tmpl) return;
+  const existing = state.data.tasks.find(t => t.templateId === templateId && t.childId === childId);
+  if (existing) {
+    state.data.tasks = state.data.tasks.filter(t => t !== existing);
+  } else {
+    state.data.tasks.push({
+      id: uid(),
+      templateId,
+      childId,
+      name: tmpl.name,
+      description: tmpl.description,
+      xp: tmpl.xp,
+      status: 'available',
+      date: todayStr()
+    });
+  }
+  saveData();
+}
+
+
+function deleteTask(id) {
+  state.data.tasks = state.data.tasks.filter(t => t.id !== id);
+  saveData();
+}
+function setTaskStatus(id, status) {
+  const t = state.data.tasks.find(t => t.id === id);
+  if (!t) return;
+  t.status = status;
+  if (status === 'done') {
+    const child = state.data.children.find(c => c.id === t.childId);
+    if (child) child.xp += t.xp;
+  }
+  saveData();
+}
+function rejectTask(id) {
+  const t = state.data.tasks.find(t => t.id === id);
+  if (!t) return;
+  t.status = 'available';
+  saveData();
+}
+
+
+function reassignAllTasks() {
+  state.data.tasks.forEach(t => {
+    t.status = 'available';
+    t.date = todayStr();
+  });
+  saveData();
+}
+function resetAllXp() {
+  state.data.children.forEach(c => { c.xp = 0; });
+  saveData();
+}
+
+
+function render() {
+  const app = document.getElementById('app');
+  let html = '';
+
+  switch (state.view) {
+    case 'welcome': html = renderWelcome(); break;
+    case 'login-parent': html = renderParentLogin(); break;
+    case 'parent-dashboard': html = renderParentDashboard(); break;
+    case 'child-select': html = renderChildSelect(); break;
+    case 'child-dashboard': html = renderChildDashboard(); break;
+    default: html = renderWelcome();
+  }
+
+  app.innerHTML = html;
+  attachHandlers();
+
+  
+  if (state.modal) {
+    renderModalOnly();
+  }
+}
+
+
+function renderModalOnly() {
+  removeModal();
+  if (!state.modal) return;
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderModal().trim();
+  const modalEl = wrapper.firstChild;
+  document.body.appendChild(modalEl);
+  attachModalHandlers(modalEl);
+}
+function removeModal() {
+  document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
+}
+
+
+function renderWelcome() {
+  return `
+    <div class="screen welcome-screen">
+      <div class="logo-badge">🎮</div> 
+      <div>
+        <h1 class="welcome-title">Missão Kids</h1>
+        <p class="welcome-subtitle" style="margin-top:10px;">Tarefas viram missões, missões viram pontos XP. Quem vai entrar?</p>
+      </div>
+      <div class="role-buttons">
+        <button class="btn btn-primary btn-block" data-action="goto-parent-login">👨‍👩‍👧 Acesso Pai</button>
+        <button class="btn btn-secondary btn-block" data-action="goto-child-select">🧒 Acesso Criança</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderParentLogin() {
+  if (!state.mathChallenge) state.mathChallenge = generateMathChallenge();
+  const { a, b } = state.mathChallenge;
+  return `
+    <div class="screen login-screen">
+      <div class="logo-badge" style="width:80px;height:80px;font-size:40px;">🔐</div>
+      <h2 style="font-size:22px;color:var(--purple-dark);">Área dos Pais</h2>
+      <p class="welcome-subtitle">Resolva a continha para entrar</p>
+      <div class="math-card">
+        <div class="math-question">${a} × ${b} = ?</div>
+        <input type="number" inputmode="numeric" class="math-input" id="math-answer" placeholder="?" autofocus>
+        <div class="math-error" id="math-error"></div>
+        <button class="btn btn-primary btn-block" data-action="check-math">Entrar</button>
+      </div>
+      <button class="btn btn-ghost btn-block" data-action="goto-welcome">← Voltar</button>
+    </div>
+  `;
+}
+
+function renderParentDashboard() {
+  const tab = state.parentTab || 'overview';
+  let body = '';
+  let fab = '';
+
+  if (tab === 'overview') {
+    body = renderOverviewTab();
+  } else if (tab === 'children') {
+    body = renderChildrenTab();
+    fab = `<button class="btn btn-primary btn-block" data-action="add-child">➕ Adicionar Criança</button>`;
+  } else if (tab === 'tasks') {
+    body = renderTasksTab();
+    fab = `<button class="btn btn-primary btn-block" data-action="add-task-template">➕ Cadastrar Tarefa</button>`;
+  }
+
+  return `
+    <div class="topbar">
+      <button class="back-btn" data-action="goto-welcome">←</button>
+      <div class="topbar-title">👨‍👩‍👧 Painel dos Pais</div>
+      <div style="width:38px;"></div>
+    </div>
+    <div class="tabbar">
+      <button class="tab-btn ${tab === 'overview' ? 'active' : ''}" data-action="parent-tab" data-tab="overview">📋 Visão Geral</button>
+      <button class="tab-btn ${tab === 'children' ? 'active' : ''}" data-action="parent-tab" data-tab="children">👧👦 Crianças</button>
+      <button class="tab-btn ${tab === 'tasks' ? 'active' : ''}" data-action="parent-tab" data-tab="tasks">📝 Tarefas</button>
+    </div>
+    <div class="content">
+      ${body}
+    </div>
+    ${fab ? `<div class="fab-wrap">${fab}</div>` : ''}
+  `;
+}
+
+function renderOverviewTab() {
+  const { children, tasks } = state.data;
+  const pending = tasks.filter(t => t.status === 'pending');
+  const totalXp = children.reduce((sum, c) => sum + c.xp, 0);
+
+  let pendingHtml = '';
+  if (pending.length === 0) {
+    pendingHtml = `<div class="empty-state" style="padding:24px 20px;">
+      <span class="emoji">📭</span>
+      <h3>Nada para aprovar</h3>
+      <p>Quando uma criança marcar uma tarefa como pronta, ela aparece aqui.</p>
+    </div>`;
+  } else {
+    pendingHtml = pending.map(t => {
+      const child = children.find(c => c.id === t.childId);
+      return `
+        <div class="task-row pending">
+          <div class="info">
+            <div class="name">${escapeHtml(t.name)}</div>
+            <div class="desc">${escapeHtml(t.description || '')}</div>
+            <div class="meta">
+              <span class="badge badge-xp">⭐ ${t.xp} XP</span>
+              <span class="badge badge-pending">${child ? child.emoji + ' ' + escapeHtml(child.name) : '—'}</span>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" style="background:#d1fae5;color:#059669;" data-action="approve-task" data-id="${t.id}" title="Aprovar">✅</button>
+            <button class="icon-btn danger" data-action="reject-task" data-id="${t.id}" title="Rejeitar">❌</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  return `
+    <div class="summary-row">
+      <div class="summary-card"><div class="num">${children.length}</div><div class="label">Crianças</div></div>
+      <div class="summary-card"><div class="num">${state.data.taskTemplates.length}</div><div class="label">Tarefas</div></div>
+      <div class="summary-card"><div class="num">${totalXp}</div><div class="label">XP total</div></div>
+    </div>
+
+    <div class="section-title">⏳ Aguardando aprovação ${pending.length ? `(${pending.length})` : ''}</div>
+    ${pendingHtml}
+
+    <div class="section-title">⚙️ Ações</div>
+    <div class="card" style="display:flex;flex-direction:column;gap:10px;">
+      <button class="btn btn-danger btn-block" data-action="reset-all-xp">⚠️ Zerar XP de Todas as Crianças</button>
+      <p style="font-size:12px;color:var(--text-soft);margin-top:-4px;">Zera o placar de XP de todas as crianças. Essa ação não pode ser desfeita.</p>
+    </div>
+  `;
+}
+
+function renderChildrenTab() {
+  const { children, tasks } = state.data;
+  if (children.length === 0) {
+    return `<div class="empty-state">
+      <span class="emoji">👶</span>
+      <h3>Nenhuma criança cadastrada</h3>
+      <p>Toque em "Adicionar Criança" para começar.</p>
+    </div>`;
+  }
+  return children.map(c => {
+    const childTasks = tasks.filter(t => t.childId === c.id);
+    return `
+      <div class="child-row">
+        <div class="avatar">${c.emoji}</div>
+        <div class="info">
+          <div class="name">${escapeHtml(c.name)}</div>
+          <div class="meta">${c.age} anos · ⭐ ${c.xp} XP · ${childTasks.length} tarefa(s) atribuída(s)</div>
+        </div>
+        <div class="actions">
+          <button class="icon-btn" data-action="edit-child" data-id="${c.id}" title="Editar">✏️</button>
+          <button class="icon-btn danger" data-action="delete-child" data-id="${c.id}" title="Excluir">🗑️</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderTasksTab() {
+  const { taskTemplates, children } = state.data;
+
+  const reassignBlock = `
+    <div class="card" style="display:flex;flex-direction:column;gap:10px;">
+      <button class="btn btn-outline btn-block" data-action="reassign-tasks">🔄 Reatribuir Tarefas do Dia</button>
+      <p style="font-size:12px;color:var(--text-soft);margin-top:-4px;">Volta todas as tarefas para "Disponível", para começar um novo dia.</p>
+    </div>
+  `;
+
+  if (taskTemplates.length === 0) {
+    return reassignBlock + `<div class="empty-state">
+      <span class="emoji">📝</span>
+      <h3>Nenhuma tarefa cadastrada</h3>
+      <p>Cadastre uma tarefa diária e depois é só atribuir às crianças.</p>
+    </div>`;
+  }
+
+  return reassignBlock + taskTemplates.map(tmpl => {
+    const assignedIds = getAssignedChildIdsForTemplate(tmpl.id);
+    const chips = children.length === 0
+      ? `<p style="font-size:12px;color:var(--text-soft);">Cadastre crianças para poder atribuir.</p>`
+      : children.map(c => {
+          const isAssigned = assignedIds.includes(c.id);
+          return `
+            <div class="assignee-chip ${isAssigned ? 'assigned' : ''}" data-action="toggle-assign" data-template-id="${tmpl.id}" data-child-id="${c.id}">
+              <span class="check">${isAssigned ? '✅' : '⬜'}</span>
+              <span>${c.emoji} ${escapeHtml(c.name)}</span>
+            </div>
+          `;
+        }).join('');
+
+    return `
+      <div class="card">
+        <div class="template-row" style="box-shadow:none;padding:0;margin-bottom:0;">
+          <div class="info">
+            <div class="name">${escapeHtml(tmpl.name)}</div>
+            <div class="desc">${escapeHtml(tmpl.description || '')}</div>
+            <div class="meta">
+              <span class="badge badge-xp">⭐ ${tmpl.xp} XP</span>
+              <span class="badge badge-daily">🔁 Diária</span>
+              ${assignedIds.length ? `<span style="color:var(--text-soft);">${assignedIds.length} atribuída(s)</span>` : ''}
+            </div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" data-action="edit-task-template" data-id="${tmpl.id}" title="Editar">✏️</button>
+            <button class="icon-btn danger" data-action="delete-task-template" data-id="${tmpl.id}" title="Excluir">🗑️</button>
+          </div>
+        </div>
+        <div class="section-title" style="margin:14px 0 0;font-size:13px;">Atribuir para:</div>
+        <div class="assignee-list">${chips}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderChildSelect() {
+  const { children } = state.data;
+  let body;
+  if (children.length === 0) {
+    body = `<div class="empty-state">
+      <span class="emoji">👶</span>
+      <h3>Nenhuma criança cadastrada</h3>
+      <p>Peça para um adulto entrar na Área dos Pais e cadastrar você!</p>
+    </div>`;
+  } else {
+    body = `<div class="child-grid">
+      ${children.map(c => `
+        <div class="child-tile" data-action="select-child" data-id="${c.id}">
+          <span class="child-emoji">${c.emoji}</span>
+          <div class="child-name">${escapeHtml(c.name)}</div>
+          <div class="child-xp">⭐ ${c.xp} XP</div>
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  return `
+    <div class="topbar">
+      <button class="back-btn" data-action="goto-welcome">←</button>
+      <div class="topbar-title">🧒 Quem é você?</div>
+      <div style="width:38px;"></div>
+    </div>
+    <div class="content">
+      ${body}
+    </div>
+  `;
+}
+
+function renderChildDashboard() {
+  const child = state.data.children.find(c => c.id === state.currentChildId);
+  if (!child) return renderChildSelect();
+
+  const myTasks = state.data.tasks.filter(t => t.childId === child.id);
+  const available = myTasks.filter(t => t.status === 'available');
+  const pending = myTasks.filter(t => t.status === 'pending');
+  const done = myTasks.filter(t => t.status === 'done');
+
+  function taskCard(t) {
+    let actionHtml = '';
+    if (t.status === 'available') {
+      actionHtml = `<button class="btn btn-success btn-sm" data-action="mark-ready" data-id="${t.id}">Marcar como Pronta</button>`;
+    } else if (t.status === 'pending') {
+      actionHtml = `<span class="badge badge-pending">⏳ Aguardando aprovação</span>`;
+    } else {
+      actionHtml = `<span class="badge badge-done">✅ Concluída</span>`;
+    }
+    const rowClass = t.status === 'done' ? 'done' : t.status === 'pending' ? 'pending' : '';
+    return `
+      <div class="task-row ${rowClass}" style="flex-direction:column;align-items:stretch;">
+        <div class="info">
+          <div class="name">${escapeHtml(t.name)}</div>
+          <div class="desc">${escapeHtml(t.description || '')}</div>
+          <div class="meta">
+            <span class="badge badge-xp">⭐ ${t.xp} XP</span>
+            <span class="badge badge-daily">🔁 Diária</span>
+          </div>
+        </div>
+        <div style="margin-top:10px;">${actionHtml}</div>
+      </div>
+    `;
+  }
+
+  let sections = '';
+  if (myTasks.length === 0) {
+    sections = `<div class="empty-state">
+      <span class="emoji">🎉</span>
+      <h3>Nenhuma missão por aqui</h3>
+      <p>Quando seus pais atribuírem tarefas, elas aparecem aqui!</p>
+    </div>`;
+  } else {
+    if (available.length) {
+      sections += `<div class="section-title">🟢 Disponíveis</div>` + available.map(taskCard).join('');
+    }
+    if (pending.length) {
+      sections += `<div class="section-title">⏳ Aguardando aprovação</div>` + pending.map(taskCard).join('');
+    }
+    if (done.length) {
+      sections += `<div class="section-title">✅ Concluídas</div>` + done.map(taskCard).join('');
+    }
+  }
+
+  return `
+    <div class="topbar">
+      <button class="back-btn" data-action="goto-child-select">←</button>
+      <div class="topbar-title">${child.emoji} ${escapeHtml(child.name)}</div>
+      <div style="width:38px;"></div>
+    </div>
+    <div class="content">
+      <div class="xp-banner">
+        <div class="child-greeting">Oi, ${escapeHtml(child.name)}! ${child.emoji}</div>
+        <div class="big-num">${child.xp}</div>
+        <div class="small-label">Pontos XP</div>
+      </div>
+      ${sections}
+    </div>
+  `;
+}
+
+
+function renderModal() {
+  const m = state.modal;
+  if (!m) return '';
+
+  if (m.type === 'child') {
+    const isEdit = m.mode === 'edit';
+    const c = m.payload || { name: '', age: '' };
+    return `
+      <div class="modal-overlay" data-action="close-modal-overlay">
+        <div class="modal" data-stop-propagation>
+          <div class="modal-handle"></div>
+          <h2>${isEdit ? '✏️ Editar Criança' : '➕ Adicionar Criança'}</h2>
+          <div class="field">
+            <label>Nome</label>
+            <input type="text" id="child-name" value="${escapeHtml(c.name)}" placeholder="Ex: João" maxlength="30">
+          </div>
+          <div class="field">
+            <label>Idade</label>
+            <input type="number" id="child-age" value="${c.age || ''}" placeholder="Ex: 8" min="1" max="18">
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-ghost btn-block" data-action="close-modal">Cancelar</button>
+            <button class="btn btn-primary btn-block" data-action="save-child" data-id="${c.id || ''}" data-mode="${m.mode}">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (m.type === 'task-template') {
+    const isEdit = m.mode === 'edit';
+    const t = m.payload || { name: '', description: '', xp: 50 };
+    return `
+      <div class="modal-overlay" data-action="close-modal-overlay">
+        <div class="modal" data-stop-propagation>
+          <div class="modal-handle"></div>
+          <h2>${isEdit ? '✏️ Editar Tarefa' : '➕ Cadastrar Tarefa'}</h2>
+          <div class="field">
+            <label>Nome da tarefa</label>
+            <input type="text" id="task-name" value="${escapeHtml(t.name)}" placeholder="Ex: Lavar louça" maxlength="40">
+          </div>
+          <div class="field">
+            <label>Descrição (opcional)</label>
+            <textarea id="task-desc" placeholder="Ex: Lavar todos os pratos depois do jantar">${escapeHtml(t.description || '')}</textarea>
+          </div>
+          <div class="field">
+            <label>XP (1 - 1000)</label>
+            <div class="range-row">
+              <input type="range" id="task-xp-range" min="1" max="1000" step="1" value="${t.xp}">
+              <div class="xp-pill"><span id="task-xp-val">${t.xp}</span> XP</div>
+            </div>
+          </div>
+          <p style="font-size:13px;color:var(--text-soft);margin-bottom:6px;">💡 Depois de salvar, atribua esta tarefa às crianças na aba "Tarefas".</p>
+          <div class="modal-actions">
+            <button class="btn btn-ghost btn-block" data-action="close-modal">Cancelar</button>
+            <button class="btn btn-primary btn-block" data-action="save-task-template" data-id="${t.id || ''}" data-mode="${m.mode}">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (m.type === 'confirm') {
+    return `
+      <div class="modal-overlay" data-action="close-modal-overlay">
+        <div class="modal" data-stop-propagation>
+          <div class="modal-handle"></div>
+          <h2>${escapeHtml(m.title || 'Confirmar')}</h2>
+          <p style="color:var(--text-soft);font-size:15px;line-height:1.5;margin-bottom:6px;">${escapeHtml(m.message || '')}</p>
+          <div class="modal-actions">
+            <button class="btn btn-ghost btn-block" data-action="close-modal">Cancelar</button>
+            <button class="btn btn-danger btn-block" data-action="confirm-yes">${escapeHtml(m.confirmLabel || 'Excluir')}</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return '';
+}
+
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, s => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[s]));
+}
+
+
+function attachHandlers() {
+  const app = document.getElementById('app');
+
+  app.addEventListener('click', onAppClick);
+
+ 
+  const mathInput = document.getElementById('math-answer');
+  if (mathInput) {
+    mathInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') checkMath();
+    });
+  }
+}
+
+
+function attachModalHandlers(modalEl) {
+  modalEl.addEventListener('click', onModalClick);
+
+  const xpRange = modalEl.querySelector('#task-xp-range');
+  if (xpRange) {
+    xpRange.addEventListener('input', e => {
+      const val = modalEl.querySelector('#task-xp-val');
+      if (val) val.textContent = e.target.value;
+    });
+  }
+}
+
+function onModalClick(e) {
+  const target = e.target.closest('[data-action]');
+  if (!target) return;
+
+  const action = target.dataset.action;
+  const id = target.dataset.id;
+
+  // Stop propagation for inner content so overlay click doesn't close it unintentionally
+  if (target.hasAttribute('data-stop-propagation') || target.closest('[data-stop-propagation]')) {
+    e.stopPropagation();
+  }
+
+  switch (action) {
+    case 'close-modal':
+    case 'close-modal-overlay':
+      // only close if the click target IS the overlay (not inner content)
+      if (action === 'close-modal-overlay' && e.target !== target) return;
+      closeModal();
+      break;
+    case 'confirm-yes':
+      if (state.modal && typeof state.modal.onConfirm === 'function') {
+        const cb = state.modal.onConfirm;
+        state.modal = null;
+        removeModal();
+        cb();
+        render();
+      }
+      break;
+    case 'save-child':
+      saveChildFromModal(target.dataset.mode, id);
+      break;
+    case 'save-task-template':
+      saveTaskTemplateFromModal(target.dataset.mode, id);
+      break;
+  }
+}
+
+function onAppClick(e) {
+  const target = e.target.closest('[data-action]');
+  if (!target) return;
+  const action = target.dataset.action;
+  const id = target.dataset.id;
+
+  switch (action) {
+    case 'goto-welcome':
+      state.mathChallenge = null;
+      go('welcome');
+      break;
+    case 'goto-parent-login':
+      state.mathChallenge = generateMathChallenge();
+      go('login-parent');
+      break;
+    case 'goto-child-select':
+      go('child-select');
+      break;
+    case 'check-math':
+      checkMath();
+      break;
+    case 'select-child':
+      go('child-dashboard', { currentChildId: id });
+      break;
+    case 'parent-tab':
+      state.parentTab = target.dataset.tab;
+      render();
+      break;
+
+    
+    case 'add-child':
+      openModal({ type: 'child', mode: 'add', payload: { name: '', age: '' } });
+      break;
+    case 'edit-child': {
+      const c = state.data.children.find(c => c.id === id);
+      openModal({ type: 'child', mode: 'edit', payload: c });
+      break;
+    }
+    case 'delete-child': {
+      const c = state.data.children.find(c => c.id === id);
+      if (c) {
+        openModal({
+          type: 'confirm',
+          title: 'Excluir criança?',
+          message: `Excluir ${c.name} e todas as suas tarefas atribuídas? Essa ação não pode ser desfeita.`,
+          onConfirm: () => {
+            deleteChild(id);
+            showToast('Criança removida', 'success');
+            render();
+          }
+        });
+      }
+      break;
+    }
+
+    
+    case 'add-task-template':
+      openModal({ type: 'task-template', mode: 'add', payload: { name: '', description: '', xp: 50 } });
+      break;
+    case 'edit-task-template': {
+      const t = state.data.taskTemplates.find(t => t.id === id);
+      openModal({ type: 'task-template', mode: 'edit', payload: t });
+      break;
+    }
+    case 'delete-task-template': {
+      const t = state.data.taskTemplates.find(t => t.id === id);
+      openModal({
+        type: 'confirm',
+        title: 'Excluir tarefa?',
+        message: `Excluir "${t ? t.name : 'esta tarefa'}" do catálogo? Ela será removida de todas as crianças. Essa ação não pode ser desfeita.`,
+        onConfirm: () => {
+          deleteTaskTemplate(id);
+          showToast('Tarefa removida do catálogo', 'success');
+          render();
+        }
+      });
+      break;
+    }
+
+    
+    case 'toggle-assign': {
+      const templateId = target.dataset.templateId;
+      const childId = target.dataset.childId;
+      toggleAssignment(templateId, childId);
+      render();
+      break;
+    }
+
+    
+    case 'approve-task':
+      setTaskStatus(id, 'done');
+      showToast('Tarefa aprovada! XP creditado 🎉', 'success');
+      render();
+      break;
+    case 'reject-task':
+      rejectTask(id);
+      showToast('Tarefa devolvida para a criança', 'info');
+      render();
+      break;
+    case 'mark-ready':
+      setTaskStatus(id, 'pending');
+      showToast('Enviado para aprovação! ⏳', 'success');
+      render();
+      break;
+
+    
+    case 'reassign-tasks':
+      openModal({
+        type: 'confirm',
+        title: 'Reatribuir tarefas do dia?',
+        message: 'Todas as tarefas (concluídas ou aguardando aprovação) voltarão para "Disponível", para que as crianças possam realizá-las novamente hoje.',
+        confirmLabel: '🔄 Reatribuir',
+        onConfirm: () => {
+          reassignAllTasks();
+          showToast('Tarefas reatribuídas para o dia 🔄', 'success');
+          render();
+        }
+      });
+      break;
+    case 'reset-all-xp':
+      openModal({
+        type: 'confirm',
+        title: 'Zerar XP de todas as crianças?',
+        message: 'O placar de XP de todas as crianças voltará para 0. Essa ação não pode ser desfeita.',
+        confirmLabel: '⚠️ Zerar XP',
+        onConfirm: () => {
+          resetAllXp();
+          showToast('XP de todas as crianças foi zerado', 'success');
+          render();
+        }
+      });
+      break;
+  }
+}
+
+function checkMath() {
+  const input = document.getElementById('math-answer');
+  const errEl = document.getElementById('math-error');
+  const val = Number(input.value);
+  if (input.value.trim() === '') {
+    errEl.textContent = 'Digite a resposta';
+    return;
+  }
+  if (val === state.mathChallenge.answer) {
+    state.mathChallenge = null;
+    go('parent-dashboard');
+  } else {
+    errEl.textContent = 'Resposta incorreta, tente de novo';
+    state.mathChallenge = generateMathChallenge();
+    setTimeout(() => render(), 600);
+  }
+}
+
+function saveChildFromModal(mode, id) {
+  const name = document.getElementById('child-name').value.trim();
+  const age = document.getElementById('child-age').value;
+  if (!name) {
+    showToast('Digite o nome da criança', 'error');
+    return;
+  }
+  if (mode === 'edit') {
+    updateChild(id, name, age);
+    showToast('Criança atualizada', 'success');
+  } else {
+    addChild(name, age);
+    showToast('Criança adicionada 🎉', 'success');
+  }
+  state.modal = null;
+  removeModal();
+  render();
+}
+
+function saveTaskTemplateFromModal(mode, id) {
+  const name = document.getElementById('task-name').value.trim();
+  const desc = document.getElementById('task-desc').value;
+  const xp = document.getElementById('task-xp-range').value;
+  if (!name) {
+    showToast('Digite o nome da tarefa', 'error');
+    return;
+  }
+  if (mode === 'edit') {
+    updateTaskTemplate(id, name, desc, xp);
+    showToast('Tarefa atualizada', 'success');
+    
+    state.data.tasks.forEach(t => {
+      if (t.templateId === id && t.status === 'available') {
+        t.name = name.trim();
+        t.description = (desc || '').trim();
+        t.xp = Math.min(1000, Math.max(1, Number(xp) || 1));
+      }
+    });
+    saveData();
+  } else {
+    addTaskTemplate(name, desc, xp);
+    showToast('Tarefa cadastrada 🎉 Agora atribua às crianças', 'success');
+  }
+  state.modal = null;
+  removeModal();
+  render();
+}
+
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    const swCode = `
+      const CACHE = 'missao-kids-v2';
+      self.addEventListener('install', e => self.skipWaiting());
+      self.addEventListener('activate', e => self.clients.claim());
+      self.addEventListener('fetch', e => {
+        e.respondWith(
+          caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
+            const resClone = res.clone();
+            caches.open(CACHE).then(c => c.put(e.request, resClone));
+            return res;
+          }).catch(() => cached))
+        );
+      });
+    `;
+    const blob = new Blob([swCode], { type: 'application/javascript' });
+    const swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl).catch(() => {});
+  });
+}
+
+
+render();
+</script>
+</body>
+</html>
